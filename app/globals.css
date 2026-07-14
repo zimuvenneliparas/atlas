@@ -28,12 +28,14 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/*
+ * Atlas usa sempre lo schema chiaro, indipendentemente dalle preferenze di
+ * sistema dell'utente: docs/DESIGN_SYSTEM.md definisce il bianco come
+ * canvas dominante (§3) e non prevede una modalità scura. Il blocco
+ * "prefers-color-scheme: dark" del template di partenza è stato rimosso
+ * perché sovrascriveva --background/--foreground con toni scuri, rendendo
+ * il testo poco leggibile su elementi senza sfondo bianco esplicito.
+ */
 
 body {
   background: var(--background);

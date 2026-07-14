@@ -1,31 +1,27 @@
-import {
-  Eraser,
-  FileEdit,
-  FileUser,
-  Receipt,
-  RefreshCw,
-  Table,
-} from "lucide-react";
+import Link from "next/link";
+import type { LucideIcon } from "lucide-react";
+import { FileUser, Receipt, RefreshCw, Table } from "lucide-react";
 import { categoryColors, type CategoryName } from "@/lib/category-colors";
+import { tools as implementedTools } from "@/lib/tools";
 
-const tools = [
-  {
-    name: "Modifica PDF",
-    category: "Documenti",
-    icon: FileEdit,
-    description: "Modifica testo, pagine e contenuti dei tuoi PDF.",
-  },
+interface ShowcaseTool {
+  slug?: string;
+  kind?: "tool" | "core-app";
+  name: string;
+  category: CategoryName;
+  icon: LucideIcon;
+  description: string;
+}
+
+// Strumenti non ancora implementati: restano visibili in home (il sito non
+// sembra vuoto) ma con azione disabilitata, per non promettere all'utente
+// qualcosa che non funziona ancora davvero.
+const comingSoon: ShowcaseTool[] = [
   {
     name: "Conversione PDF",
     category: "Documenti",
     icon: RefreshCw,
     description: "Converti PDF in Word, Excel e altri formati.",
-  },
-  {
-    name: "Rimozione sfondo immagini",
-    category: "Immagini",
-    icon: Eraser,
-    description: "Rimuovi lo sfondo dalle tue immagini in un click.",
   },
   {
     name: "Generatore CV",
@@ -48,6 +44,20 @@ const tools = [
   },
 ];
 
+const showcase: ShowcaseTool[] = [
+  ...implementedTools.map(
+    (tool): ShowcaseTool => ({
+      slug: tool.slug,
+      kind: tool.kind,
+      name: tool.name,
+      category: tool.category,
+      icon: tool.icon,
+      description: tool.description,
+    })
+  ),
+  ...comingSoon,
+];
+
 export default function PopularTools() {
   return (
     <section className="mx-auto max-w-6xl px-6 py-16">
@@ -56,8 +66,9 @@ export default function PopularTools() {
       </h2>
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3">
-        {tools.map((tool) => {
-          const colors = categoryColors[tool.category as CategoryName];
+        {showcase.map((tool) => {
+          const colors = categoryColors[tool.category];
+          const isAvailable = Boolean(tool.slug);
 
           return (
             <div
@@ -65,7 +76,11 @@ export default function PopularTools() {
               className={`flex flex-col gap-5 rounded-2xl border ${colors.border} bg-surface p-8 transition-all duration-[180ms] ease-out hover:-translate-y-0.5 ${colors.borderHover}`}
             >
               <div className="flex items-center justify-between">
-                <tool.icon size={24} strokeWidth={1.75} className={colors.icon} />
+                <tool.icon
+                  size={24}
+                  strokeWidth={1.75}
+                  className={colors.icon}
+                />
                 <span
                   className={`rounded-full border ${colors.borderStrong} bg-white px-3 py-1 text-xs font-medium text-gray-950`}
                 >
@@ -81,11 +96,22 @@ export default function PopularTools() {
               </div>
 
               <div className="mt-auto border-t border-border pt-4">
-                <button
-                  className={`w-full rounded-full border ${colors.borderStrong} bg-white py-3 text-sm font-semibold text-gray-950 transition-colors duration-[180ms] ease-out ${colors.borderHover} focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none`}
-                >
-                  Apri
-                </button>
+                {isAvailable ? (
+                  <Link
+                    href={`${tool.kind === "core-app" ? "/apps" : "/tools"}/${tool.slug}`}
+                    className={`block w-full rounded-full border ${colors.borderStrong} bg-white py-3 text-center text-sm font-semibold text-gray-950 transition-colors duration-[180ms] ease-out ${colors.borderHover} focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:outline-none`}
+                  >
+                    Apri
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full cursor-not-allowed rounded-full border border-border bg-white py-3 text-sm font-semibold text-gray-400"
+                  >
+                    Prossimamente
+                  </button>
+                )}
               </div>
             </div>
           );
