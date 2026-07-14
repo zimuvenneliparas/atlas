@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# generato da scripts/copy-pdf-worker.mjs dopo npm install, non va versionato
+/public/pdf.worker.min.mjs
+
+# config locale della sessione Claude, non va condivisa
+.claude/
