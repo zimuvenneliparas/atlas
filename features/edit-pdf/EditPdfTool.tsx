@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState, type ChangeEvent, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useState, type ChangeEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
   ArrowDown,
   ArrowUp,
   Download,
   Loader2,
+  Redo2,
   RotateCw,
+  Undo2,
   Upload,
   X,
 } from "lucide-react";
@@ -20,6 +22,7 @@ import {
   createSignatureFreeElement,
   fileToPngDataUrl,
   freeElementScreenRect,
+  isPasswordProtectedError,
   FONT_OPTIONS,
   RENDER_SCALE,
   type RenderedPage,
@@ -57,6 +60,76 @@ export default function EditPdfTool() {
   const [exportStatus, setExportStatus] = useState<ExportStatus>("idle");
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [historyPast, setHistoryPast] = useState<PageState[][]>([]);
+  const [historyFuture, setHistoryFuture] = useState<PageState[][]>([]);
+
+  const MAX_HISTORY = 50;
+
+  /** Copia le pagine per la cronologia: clona le Map (edits/elements) così le modifiche successive non alterano lo snapshot salvato. File/render restano condivisi perché immutabili. */
+  function snapshotPages(current: PageState[]): PageState[] {
+    return current.map((page) => ({
+      ...page,
+      edits: new Map(page.edits),
+      elements: new Map(page.elements),
+    }));
+  }
+
+  /** Salva lo stato attuale prima di una modifica, così l'azione può essere annullata. Va chiamata UNA VOLTA all'inizio di ogni interazione (non ad ogni tocco tasto/trascinamento), per raggruppare un'intera modifica in un solo passo di Annulla. */
+  function recordHistory() {
+    setHistoryPast((prev) => {
+      const next = [...prev, snapshotPages(pages)];
+      return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+    });
+    setHistoryFuture([]);
+  }
+
+  function undo() {
+    if (historyPast.length === 0) return;
+    const previous = historyPast[historyPast.length - 1];
+    setHistoryPast((prev) => prev.slice(0, -1));
+    setHistoryFuture((prev) => [...prev, snapshotPages(pages)]);
+    setPages(previous);
+    setEditingKey(null);
+    setSelectedElementKey(null);
+  }
+
+  function redo() {
+    if (historyFuture.length === 0) return;
+    const next = historyFuture[historyFuture.length - 1];
+    setHistoryFuture((prev) => prev.slice(0, -1));
+    setHistoryPast((prev) => [...prev, snapshotPages(pages)]);
+    setPages(next);
+    setEditingKey(null);
+    setSelectedElementKey(null);
+  }
+
+  // Scorciatoie da tastiera Ctrl/Cmd+Z (annulla) e Ctrl/Cmd+Shift+Z o Ctrl+Y
+  // (ripeti). Se il focus è su un campo di testo lasciamo che sia il
+  // browser a gestire l'annulla nativo di quel campo, per non creare due
+  // sistemi di annulla in conflitto.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = document.activeElement;
+      const isTextInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      if (isTextInput) return;
+
+      const modifier = event.ctrlKey || event.metaKey;
+      if (!modifier) return;
+
+      if (event.key.toLowerCase() === "z" && event.shiftKey) {
+        event.preventDefault();
+        redo();
+      } else if (event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        undo();
+      } else if (event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redo();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pages, historyPast, historyFuture]);
 
   // Renderizza una pagina alla volta: appena una pagina ottiene il suo
   // "render", questo effetto si riattiva e passa alla prossima ancora senza.
@@ -107,6 +180,7 @@ export default function EditPdfTool() {
 
     const newPages: PageState[] = [];
     const failedFiles: string[] = [];
+    const passwordProtectedFiles: string[] = [];
 
     for (const file of pdfFiles) {
       try {
@@ -126,11 +200,18 @@ export default function EditPdfTool() {
         }
       } catch (error) {
         console.error(error);
-        failedFiles.push(file.name);
+        if (isPasswordProtectedError(error)) {
+          passwordProtectedFiles.push(file.name);
+        } else {
+          failedFiles.push(file.name);
+        }
       }
     }
 
-    setPages((prev) => [...prev, ...newPages]);
+    if (newPages.length > 0) {
+      recordHistory();
+      setPages((prev) => [...prev, ...newPages]);
+    }
     setIsLoadingFiles(false);
 
     const warnings: string[] = [];
@@ -139,10 +220,13 @@ export default function EditPdfTool() {
         `${skippedNonPdf} file ${skippedNonPdf === 1 ? "non era un PDF ed è stato ignorato" : "non erano PDF e sono stati ignorati"}.`
       );
     }
-    if (failedFiles.length > 0) {
+    if (passwordProtectedFiles.length > 0) {
       warnings.push(
-        `Non sono riuscito a leggere: ${failedFiles.join(", ")} (potrebbero essere protetti da password o danneggiati).`
+        `${passwordProtectedFiles.join(", ")} ${passwordProtectedFiles.length === 1 ? "è protetto" : "sono protetti"} da password: rimuovi la protezione prima di caricarlo qui.`
       );
+    }
+    if (failedFiles.length > 0) {
+      warnings.push(`Non sono riuscito a leggere: ${failedFiles.join(", ")} (file danneggiato).`);
     }
     if (warnings.length > 0) {
       setWarningMessage(warnings.join(" "));
@@ -171,12 +255,14 @@ export default function EditPdfTool() {
   }
 
   function removePage(id: string) {
+    recordHistory();
     setPages((prev) => prev.filter((page) => page.id !== id));
     setEditingKey(null);
     setSelectedElementKey(null);
   }
 
   function movePage(index: number, direction: -1 | 1) {
+    recordHistory();
     setPages((prev) => {
       const target = index + direction;
       if (target < 0 || target >= prev.length) return prev;
@@ -187,6 +273,7 @@ export default function EditPdfTool() {
   }
 
   function rotatePage(id: string) {
+    recordHistory();
     setPages((prev) =>
       prev.map((page) =>
         page.id === id
@@ -211,11 +298,19 @@ export default function EditPdfTool() {
   }
 
   function startEditing(pageId: string, item: PdfTextItem) {
+    recordHistory();
     updateEdit(pageId, item, (prev) => prev);
     setEditingKey(`${pageId}:${item.itemIndex}`);
   }
 
+  /** Riapre in modifica un testo già modificato in precedenza (click su un edit esistente): registra comunque la cronologia, così eventuali ulteriori ritocchi restano annullabili. */
+  function reopenEditing(key: string) {
+    recordHistory();
+    setEditingKey(key);
+  }
+
   function restoreOriginal(pageId: string, itemIndex: number) {
+    recordHistory();
     setPages((prev) =>
       prev.map((page) => {
         if (page.id !== pageId) return page;
@@ -253,15 +348,16 @@ export default function EditPdfTool() {
     setEditingKey(null);
   }
 
-  function startMove(pageId: string, item: PdfTextItem, edit: TextEdit, event: ReactMouseEvent) {
+  function startMove(pageId: string, item: PdfTextItem, edit: TextEdit, event: ReactPointerEvent) {
     event.preventDefault();
     event.stopPropagation();
+    recordHistory();
     const startX = event.clientX;
     const startY = event.clientY;
     const initialOffsetX = edit.offsetX;
     const initialOffsetY = edit.offsetY;
 
-    function onMove(moveEvent: globalThis.MouseEvent) {
+    function onMove(moveEvent: PointerEvent) {
       const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
       const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
       updateEdit(pageId, item, (prev) => ({
@@ -271,22 +367,25 @@ export default function EditPdfTool() {
       }));
     }
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
-  function startResize(pageId: string, item: PdfTextItem, edit: TextEdit, event: ReactMouseEvent) {
+  function startResize(pageId: string, item: PdfTextItem, edit: TextEdit, event: ReactPointerEvent) {
     event.preventDefault();
     event.stopPropagation();
+    recordHistory();
     const startX = event.clientX;
     const startY = event.clientY;
     const initialWidth = edit.width;
     const initialHeight = edit.height;
 
-    function onMove(moveEvent: globalThis.MouseEvent) {
+    function onMove(moveEvent: PointerEvent) {
       const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
       const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
       updateEdit(pageId, item, (prev) => ({
@@ -296,11 +395,13 @@ export default function EditPdfTool() {
       }));
     }
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
   function updateElement(pageId: string, elementId: string, updater: (prev: FreeElement) => FreeElement) {
@@ -319,6 +420,7 @@ export default function EditPdfTool() {
   function addTextElement(pageId: string) {
     const page = pages.find((candidate) => candidate.id === pageId);
     if (!page?.render) return;
+    recordHistory();
     const element = createDefaultFreeText(page.render.pdfPageWidth, page.render.pdfPageHeight);
     setPages((prev) =>
       prev.map((candidate) =>
@@ -336,6 +438,7 @@ export default function EditPdfTool() {
     try {
       const { dataUrl, width, height } = await fileToPngDataUrl(file);
       const element = createImageFreeElement(dataUrl, width, height, page.render.pdfPageWidth, page.render.pdfPageHeight);
+      recordHistory();
       setPages((prev) =>
         prev.map((candidate) =>
           candidate.id === pageId
@@ -360,6 +463,7 @@ export default function EditPdfTool() {
     if (!pageId) return;
     const page = pages.find((candidate) => candidate.id === pageId);
     if (!page?.render) return;
+    recordHistory();
     const element = createSignatureFreeElement(dataUrl, width, height, page.render.pdfPageWidth, page.render.pdfPageHeight);
     setPages((prev) =>
       prev.map((candidate) =>
@@ -371,7 +475,14 @@ export default function EditPdfTool() {
     setSelectedElementKey(`${pageId}:${element.id}`);
   }
 
+  /** Seleziona un elemento libero già presente sulla pagina (equivalente di startEditing per il testo esistente): registra la cronologia una sola volta all'apertura, non ad ogni ritocco successivo. */
+  function selectElement(pageId: string, elementId: string) {
+    recordHistory();
+    setSelectedElementKey(`${pageId}:${elementId}`);
+  }
+
   function deleteElement(pageId: string, elementId: string) {
+    recordHistory();
     setPages((prev) =>
       prev.map((page) => {
         if (page.id !== pageId) return page;
@@ -383,36 +494,40 @@ export default function EditPdfTool() {
     setSelectedElementKey((prev) => (prev === `${pageId}:${elementId}` ? null : prev));
   }
 
-  function startMoveElement(pageId: string, elementId: string, element: FreeElement, event: ReactMouseEvent) {
+  function startMoveElement(pageId: string, elementId: string, element: FreeElement, event: ReactPointerEvent) {
     event.preventDefault();
     event.stopPropagation();
+    recordHistory();
     const startX = event.clientX;
     const startY = event.clientY;
     const initialX = element.x;
     const initialY = element.y;
 
-    function onMove(moveEvent: globalThis.MouseEvent) {
+    function onMove(moveEvent: PointerEvent) {
       const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
       const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
       updateElement(pageId, elementId, (prev) => ({ ...prev, x: initialX + dx, y: initialY - dy }));
     }
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
-  function startResizeElement(pageId: string, elementId: string, element: FreeElement, event: ReactMouseEvent) {
+  function startResizeElement(pageId: string, elementId: string, element: FreeElement, event: ReactPointerEvent) {
     event.preventDefault();
     event.stopPropagation();
+    recordHistory();
     const startX = event.clientX;
     const startY = event.clientY;
     const initialWidth = element.width;
     const initialHeight = element.height;
 
-    function onMove(moveEvent: globalThis.MouseEvent) {
+    function onMove(moveEvent: PointerEvent) {
       const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
       const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
       updateElement(pageId, elementId, (prev) => ({
@@ -422,11 +537,13 @@ export default function EditPdfTool() {
       }));
     }
     function onUp() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
   async function handleExport() {
@@ -517,7 +634,31 @@ export default function EditPdfTool() {
           pallino in alto a sinistra per spostarlo, quello in basso a destra
           per ridimensionarlo; &quot;Ripristina&quot; annulla la singola
           modifica. Con i pulsanti sopra ogni pagina puoi anche aggiungere
-          testo libero, immagini e la tua firma.
+          testo libero, immagini e la tua firma. Se sbagli qualcosa usa
+          &quot;Annulla&quot; (o Ctrl+Z) qui sotto.
+        </div>
+      )}
+
+      {(pages.length > 0 || historyPast.length > 0 || historyFuture.length > 0) && (
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={undo}
+            disabled={historyPast.length === 0}
+            className="flex items-center gap-2 rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors duration-[180ms] ease-out hover:border-secondary hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Undo2 size={24} strokeWidth={1.75} aria-hidden="true" />
+            Annulla
+          </button>
+          <button
+            type="button"
+            onClick={redo}
+            disabled={historyFuture.length === 0}
+            className="flex items-center gap-2 rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition-colors duration-[180ms] ease-out hover:border-secondary hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Redo2 size={24} strokeWidth={1.75} aria-hidden="true" />
+            Ripeti
+          </button>
         </div>
       )}
 
@@ -585,6 +726,14 @@ export default function EditPdfTool() {
                     onOpenSignature={() => openSignaturePad(page.id)}
                   />
                 </div>
+              )}
+
+              {page.render && page.render.items.length === 0 && (
+                <p className="mb-3 text-xs text-gray-500">
+                  Questa pagina non ha testo selezionabile (probabilmente una
+                  scansione o un&apos;immagine): puoi comunque aggiungere
+                  testo libero, immagini o la tua firma con i pulsanti sopra.
+                </p>
               )}
 
               {page.render && (
@@ -688,7 +837,7 @@ export default function EditPdfTool() {
                             />
                           ) : (
                             <span
-                              onClick={() => setEditingKey(key)}
+                              onClick={() => reopenEditing(key)}
                               style={{
                                 display: "block",
                                 width: "100%",
@@ -707,7 +856,7 @@ export default function EditPdfTool() {
                           {isEditing && (
                             <>
                               <div
-                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
                                 className="flex items-center gap-1 rounded-lg border border-border bg-white p-1 shadow-sm"
                                 style={{
                                   position: "absolute",
@@ -766,38 +915,46 @@ export default function EditPdfTool() {
 
                               {page.rotation === 0 && (
                                 <div
-                                  onMouseDown={(event) => startMove(page.id, item, active, event)}
+                                  onPointerDown={(event) => startMove(page.id, item, active, event)}
                                   title="Trascina per spostare"
                                   style={{
                                     position: "absolute",
-                                    left: -8,
-                                    top: -8,
-                                    width: 14,
-                                    height: 14,
-                                    borderRadius: "50%",
-                                    background: "#4f46e5",
+                                    left: -20,
+                                    top: -20,
+                                    width: 40,
+                                    height: 40,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
                                     cursor: "move",
+                                    touchAction: "none",
                                     zIndex: 20,
                                   }}
-                                />
+                                >
+                                  <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#4f46e5" }} />
+                                </div>
                               )}
 
                               {page.rotation === 0 && (
                                 <div
-                                  onMouseDown={(event) => startResize(page.id, item, active, event)}
+                                  onPointerDown={(event) => startResize(page.id, item, active, event)}
                                   title="Trascina per ridimensionare"
                                   style={{
                                     position: "absolute",
-                                    right: -8,
-                                    bottom: -8,
-                                    width: 14,
-                                    height: 14,
-                                    borderRadius: "50%",
-                                    background: "#4f46e5",
+                                    right: -20,
+                                    bottom: -20,
+                                    width: 40,
+                                    height: 40,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
                                     cursor: "nwse-resize",
+                                    touchAction: "none",
                                     zIndex: 20,
                                   }}
-                                />
+                                >
+                                  <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#4f46e5" }} />
+                                </div>
                               )}
                             </>
                           )}
@@ -816,7 +973,7 @@ export default function EditPdfTool() {
                           scale={RENDER_SCALE}
                           allowDrag={page.rotation === 0}
                           isSelected={selectedElementKey === key}
-                          onSelect={() => setSelectedElementKey(key)}
+                          onSelect={() => selectElement(page.id, elementId)}
                           onDeselect={() => setSelectedElementKey(null)}
                           onTextChange={(text) =>
                             updateElement(page.id, elementId, (prev) => (prev.type === "text" ? { ...prev, text } : prev))

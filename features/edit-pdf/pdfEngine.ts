@@ -230,6 +230,11 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
   });
 }
 
+/** Rileva se un errore di caricamento è dovuto a un PDF protetto da password (pdfjs-dist lancia un errore con name "PasswordException" in questo caso), per mostrare un messaggio più preciso invece di uno generico. */
+export function isPasswordProtectedError(error: unknown): boolean {
+  return error instanceof Error && error.name === "PasswordException";
+}
+
 function dataUrlToBytes(dataUrl: string): Uint8Array {
   const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
   const binary = atob(base64);

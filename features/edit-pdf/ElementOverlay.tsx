@@ -1,6 +1,6 @@
 "use client";
 
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { X } from "lucide-react";
 import { FONT_OPTIONS, type FontFamilyOption, type FreeElement } from "./pdfEngine";
 
@@ -24,8 +24,8 @@ interface ElementOverlayProps {
   onFontChange: (fontFamily: FontFamilyOption) => void;
   onFontSizeChange: (fontSize: number) => void;
   onDelete: () => void;
-  onStartMove: (event: ReactMouseEvent) => void;
-  onStartResize: (event: ReactMouseEvent) => void;
+  onStartMove: (event: ReactPointerEvent) => void;
+  onStartResize: (event: ReactPointerEvent) => void;
 }
 
 /**
@@ -125,7 +125,7 @@ export default function ElementOverlay({
       {isSelected && (
         <>
           <div
-            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
             className="flex items-center gap-1 rounded-lg border border-border bg-white p-1 shadow-sm"
             style={{ position: "absolute", left: 0, top: -48, zIndex: 20, whiteSpace: "nowrap" }}
           >
@@ -174,37 +174,45 @@ export default function ElementOverlay({
 
           {allowDrag && (
             <div
-              onMouseDown={(event) => onStartMove(event)}
+              onPointerDown={(event) => onStartMove(event)}
               title="Trascina per spostare"
               style={{
                 position: "absolute",
-                left: -8,
-                top: -8,
-                width: 14,
-                height: 14,
-                borderRadius: "50%",
-                background: "#4f46e5",
+                left: -20,
+                top: -20,
+                width: 40,
+                height: 40,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
                 cursor: "move",
+                touchAction: "none",
                 zIndex: 20,
               }}
-            />
+            >
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#4f46e5" }} />
+            </div>
           )}
           {allowDrag && (
             <div
-              onMouseDown={(event) => onStartResize(event)}
+              onPointerDown={(event) => onStartResize(event)}
               title="Trascina per ridimensionare"
               style={{
                 position: "absolute",
-                right: -8,
-                bottom: -8,
-                width: 14,
-                height: 14,
-                borderRadius: "50%",
-                background: "#4f46e5",
+                right: -20,
+                bottom: -20,
+                width: 40,
+                height: 40,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
                 cursor: "nwse-resize",
+                touchAction: "none",
                 zIndex: 20,
               }}
-            />
+            >
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#4f46e5" }} />
+            </div>
           )}
         </>
       )}
