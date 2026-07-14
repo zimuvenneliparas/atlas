@@ -15,13 +15,22 @@ import {
   renderPage,
   exportPdf,
   createDefaultEdit,
+  createDefaultFreeText,
+  createImageFreeElement,
+  createSignatureFreeElement,
+  fileToPngDataUrl,
+  freeElementScreenRect,
   FONT_OPTIONS,
   RENDER_SCALE,
   type RenderedPage,
   type PdfTextItem,
   type TextEdit,
   type FontFamilyOption,
+  type FreeElement,
 } from "./pdfEngine";
+import PageToolbar from "./PageToolbar";
+import SignaturePad from "./SignaturePad";
+import ElementOverlay from "./ElementOverlay";
 
 type ExportStatus = "idle" | "processing" | "success" | "error";
 
@@ -32,6 +41,8 @@ interface PageState {
   pageIndex: number;
   rotation: 0 | 90 | 180 | 270;
   edits: Map<number, TextEdit>;
+  /** Testo libero, immagini e firme aggiunti dall'utente su questa pagina, indicizzati per id elemento. */
+  elements: Map<string, FreeElement>;
   render: RenderedPage | null;
   renderError: string | null;
 }
@@ -41,6 +52,8 @@ export default function EditPdfTool() {
   const [isLoadingFiles, setIsLoadingFiles] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [selectedElementKey, setSelectedElementKey] = useState<string | null>(null);
+  const [signatureTargetPageId, setSignatureTargetPageId] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportStatus>("idle");
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -106,6 +119,7 @@ export default function EditPdfTool() {
             pageIndex: i,
             rotation: 0,
             edits: new Map(),
+            elements: new Map(),
             render: null,
             renderError: null,
           });
@@ -159,6 +173,7 @@ export default function EditPdfTool() {
   function removePage(id: string) {
     setPages((prev) => prev.filter((page) => page.id !== id));
     setEditingKey(null);
+    setSelectedElementKey(null);
   }
 
   function movePage(index: number, direction: -1 | 1) {
@@ -180,6 +195,7 @@ export default function EditPdfTool() {
       )
     );
     setEditingKey(null);
+    setSelectedElementKey(null);
   }
 
   function updateEdit(pageId: string, item: PdfTextItem, updater: (prev: TextEdit) => TextEdit) {
@@ -287,6 +303,132 @@ export default function EditPdfTool() {
     window.addEventListener("mouseup", onUp);
   }
 
+  function updateElement(pageId: string, elementId: string, updater: (prev: FreeElement) => FreeElement) {
+    setPages((prev) =>
+      prev.map((page) => {
+        if (page.id !== pageId) return page;
+        const current = page.elements.get(elementId);
+        if (!current) return page;
+        const elements = new Map(page.elements);
+        elements.set(elementId, updater(current));
+        return { ...page, elements };
+      })
+    );
+  }
+
+  function addTextElement(pageId: string) {
+    const page = pages.find((candidate) => candidate.id === pageId);
+    if (!page?.render) return;
+    const element = createDefaultFreeText(page.render.pdfPageWidth, page.render.pdfPageHeight);
+    setPages((prev) =>
+      prev.map((candidate) =>
+        candidate.id === pageId
+          ? { ...candidate, elements: new Map(candidate.elements).set(element.id, element) }
+          : candidate
+      )
+    );
+    setSelectedElementKey(`${pageId}:${element.id}`);
+  }
+
+  async function addImageElement(pageId: string, file: File) {
+    const page = pages.find((candidate) => candidate.id === pageId);
+    if (!page?.render) return;
+    try {
+      const { dataUrl, width, height } = await fileToPngDataUrl(file);
+      const element = createImageFreeElement(dataUrl, width, height, page.render.pdfPageWidth, page.render.pdfPageHeight);
+      setPages((prev) =>
+        prev.map((candidate) =>
+          candidate.id === pageId
+            ? { ...candidate, elements: new Map(candidate.elements).set(element.id, element) }
+            : candidate
+        )
+      );
+      setSelectedElementKey(`${pageId}:${element.id}`);
+    } catch (error) {
+      console.error(error);
+      setErrorMessage("Non sono riuscito a caricare questa immagine. Prova con un altro file.");
+    }
+  }
+
+  function openSignaturePad(pageId: string) {
+    setSignatureTargetPageId(pageId);
+  }
+
+  function handleSignatureConfirm(dataUrl: string, width: number, height: number) {
+    const pageId = signatureTargetPageId;
+    setSignatureTargetPageId(null);
+    if (!pageId) return;
+    const page = pages.find((candidate) => candidate.id === pageId);
+    if (!page?.render) return;
+    const element = createSignatureFreeElement(dataUrl, width, height, page.render.pdfPageWidth, page.render.pdfPageHeight);
+    setPages((prev) =>
+      prev.map((candidate) =>
+        candidate.id === pageId
+          ? { ...candidate, elements: new Map(candidate.elements).set(element.id, element) }
+          : candidate
+      )
+    );
+    setSelectedElementKey(`${pageId}:${element.id}`);
+  }
+
+  function deleteElement(pageId: string, elementId: string) {
+    setPages((prev) =>
+      prev.map((page) => {
+        if (page.id !== pageId) return page;
+        const elements = new Map(page.elements);
+        elements.delete(elementId);
+        return { ...page, elements };
+      })
+    );
+    setSelectedElementKey((prev) => (prev === `${pageId}:${elementId}` ? null : prev));
+  }
+
+  function startMoveElement(pageId: string, elementId: string, element: FreeElement, event: ReactMouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const initialX = element.x;
+    const initialY = element.y;
+
+    function onMove(moveEvent: globalThis.MouseEvent) {
+      const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
+      const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
+      updateElement(pageId, elementId, (prev) => ({ ...prev, x: initialX + dx, y: initialY - dy }));
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function startResizeElement(pageId: string, elementId: string, element: FreeElement, event: ReactMouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const initialWidth = element.width;
+    const initialHeight = element.height;
+
+    function onMove(moveEvent: globalThis.MouseEvent) {
+      const dx = (moveEvent.clientX - startX) / RENDER_SCALE;
+      const dy = (moveEvent.clientY - startY) / RENDER_SCALE;
+      updateElement(pageId, elementId, (prev) => ({
+        ...prev,
+        width: Math.max(8, initialWidth + dx),
+        height: Math.max(8, initialHeight + dy),
+      }));
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   async function handleExport() {
     if (pages.length === 0) return;
 
@@ -301,6 +443,7 @@ export default function EditPdfTool() {
           rotation: page.rotation,
           edits: page.edits,
           items: page.render?.items ?? [],
+          elements: Array.from(page.elements.values()),
         }))
       );
 
@@ -367,6 +510,18 @@ export default function EditPdfTool() {
       )}
 
       {pages.length > 0 && (
+        <div className="mt-6 rounded-xl border border-border bg-surface p-4 text-sm text-gray-600">
+          <span className="font-medium text-gray-900">Come funziona: </span>
+          clicca su un testo del PDF per modificarlo — cambia contenuto, font e
+          dimensione dalla barra che appare sopra il riquadro. Trascina il
+          pallino in alto a sinistra per spostarlo, quello in basso a destra
+          per ridimensionarlo; &quot;Ripristina&quot; annulla la singola
+          modifica. Con i pulsanti sopra ogni pagina puoi anche aggiungere
+          testo libero, immagini e la tua firma.
+        </div>
+      )}
+
+      {pages.length > 0 && (
         <div className="mt-6 flex flex-col gap-6">
           {pages.map((page, index) => (
             <div key={page.id} className="rounded-xl border border-border bg-surface p-4">
@@ -419,6 +574,16 @@ export default function EditPdfTool() {
               {!page.render && !page.renderError && (
                 <div className="flex h-40 items-center justify-center">
                   <Loader2 size={24} strokeWidth={1.75} className="animate-spin text-gray-400" />
+                </div>
+              )}
+
+              {page.render && (
+                <div className="mb-3">
+                  <PageToolbar
+                    onAddText={() => addTextElement(page.id)}
+                    onAddImage={(file) => addImageElement(page.id, file)}
+                    onOpenSignature={() => openSignaturePad(page.id)}
+                  />
                 </div>
               )}
 
@@ -639,6 +804,37 @@ export default function EditPdfTool() {
                         </div>
                       );
                     })}
+
+                    {Array.from(page.elements.entries()).map(([elementId, element]) => {
+                      const key = `${page.id}:${elementId}`;
+                      const rect = freeElementScreenRect(element, page.render!.pdfPageHeight, RENDER_SCALE);
+                      return (
+                        <ElementOverlay
+                          key={key}
+                          element={element}
+                          rect={rect}
+                          scale={RENDER_SCALE}
+                          allowDrag={page.rotation === 0}
+                          isSelected={selectedElementKey === key}
+                          onSelect={() => setSelectedElementKey(key)}
+                          onDeselect={() => setSelectedElementKey(null)}
+                          onTextChange={(text) =>
+                            updateElement(page.id, elementId, (prev) => (prev.type === "text" ? { ...prev, text } : prev))
+                          }
+                          onFontChange={(fontFamily) =>
+                            updateElement(page.id, elementId, (prev) =>
+                              prev.type === "text" ? { ...prev, fontFamily } : prev
+                            )
+                          }
+                          onFontSizeChange={(fontSize) =>
+                            updateElement(page.id, elementId, (prev) => (prev.type === "text" ? { ...prev, fontSize } : prev))
+                          }
+                          onDelete={() => deleteElement(page.id, elementId)}
+                          onStartMove={(event) => startMoveElement(page.id, elementId, element, event)}
+                          onStartResize={(event) => startResizeElement(page.id, elementId, element, event)}
+                        />
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -671,6 +867,12 @@ export default function EditPdfTool() {
           Carica almeno un PDF per iniziare a modificarlo.
         </p>
       )}
+
+      <SignaturePad
+        open={signatureTargetPageId !== null}
+        onCancel={() => setSignatureTargetPageId(null)}
+        onConfirm={handleSignatureConfirm}
+      />
     </div>
   );
 }

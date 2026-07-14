@@ -26,6 +26,9 @@ export interface RenderedPage {
   canvasDataUrl: string;
   displayWidth: number;
   displayHeight: number;
+  /** Dimensioni della pagina in punti PDF (senza scala), usate per posizionare gli elementi liberi (testo, immagini, firme). */
+  pdfPageWidth: number;
+  pdfPageHeight: number;
   items: PdfTextItem[];
 }
 
@@ -74,6 +77,167 @@ export function createDefaultEdit(item: PdfTextItem): TextEdit {
     offsetX: 0,
     offsetY: 0,
   };
+}
+
+/**
+ * Elementi "liberi": aggiunti dall'utente in un punto qualsiasi della
+ * pagina (non collegati a un testo originale del PDF), a differenza di
+ * TextEdit che modifica sempre un frammento di testo esistente.
+ *
+ * Convenzione coordinate: x/y sono in punti PDF, con (x, y) = angolo in
+ * ALTO a sinistra del riquadro (y = distanza dal basso pagina del bordo
+ * superiore). Questa scelta permette di riusare la stessa matematica di
+ * trascinamento/ridimensionamento già validata per TextEdit (ancoraggio
+ * in alto a sinistra, l'altezza cresce verso il basso). In fase di export
+ * si converte nel formato bottom-left richiesto da pdf-lib.
+ */
+interface FreeElementBase {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface FreeTextElement extends FreeElementBase {
+  type: "text";
+  text: string;
+  fontSize: number;
+  fontFamily: FontFamilyOption;
+}
+
+export interface FreeImageElement extends FreeElementBase {
+  type: "image";
+  dataUrl: string;
+}
+
+export interface FreeSignatureElement extends FreeElementBase {
+  type: "signature";
+  dataUrl: string;
+}
+
+export type FreeElement = FreeTextElement | FreeImageElement | FreeSignatureElement;
+
+/** Converte il riquadro di un elemento libero (punti PDF) in pixel a schermo, coerente con la scala e l'orientamento usati per il testo esistente. */
+export function freeElementScreenRect(
+  el: { x: number; y: number; width: number; height: number },
+  pdfPageHeight: number,
+  scale = RENDER_SCALE
+) {
+  return {
+    left: el.x * scale,
+    top: (pdfPageHeight - el.y) * scale,
+    width: el.width * scale,
+    height: el.height * scale,
+  };
+}
+
+export function createDefaultFreeText(pdfPageWidth: number, pdfPageHeight: number): FreeTextElement {
+  const width = 180;
+  const height = 26;
+  const x = Math.max(20, (pdfPageWidth - width) / 2);
+  const y = Math.min(pdfPageHeight - 20, Math.max(height + 20, pdfPageHeight / 2 + height / 2));
+  return {
+    id: crypto.randomUUID(),
+    type: "text",
+    x,
+    y,
+    width,
+    height,
+    text: "Testo",
+    fontSize: 16,
+    fontFamily: "Helvetica",
+  };
+}
+
+function placeImageElement(
+  type: "image" | "signature",
+  dataUrl: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  pdfPageWidth: number,
+  pdfPageHeight: number
+): FreeImageElement | FreeSignatureElement {
+  const maxWidth = Math.min(220, pdfPageWidth * 0.6);
+  const aspect = naturalWidth > 0 ? naturalHeight / naturalWidth : 1;
+  const width = maxWidth;
+  const height = Math.max(20, width * aspect);
+  const x = Math.max(20, (pdfPageWidth - width) / 2);
+  const y = Math.min(pdfPageHeight - 20, Math.max(height + 20, pdfPageHeight / 2 + height / 2));
+  const base = { id: crypto.randomUUID(), x, y, width, height, dataUrl };
+  return type === "image" ? { ...base, type: "image" } : { ...base, type: "signature" };
+}
+
+export function createImageFreeElement(
+  dataUrl: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  pdfPageWidth: number,
+  pdfPageHeight: number
+): FreeImageElement {
+  return placeImageElement("image", dataUrl, naturalWidth, naturalHeight, pdfPageWidth, pdfPageHeight) as FreeImageElement;
+}
+
+export function createSignatureFreeElement(
+  dataUrl: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  pdfPageWidth: number,
+  pdfPageHeight: number
+): FreeSignatureElement {
+  return placeImageElement(
+    "signature",
+    dataUrl,
+    naturalWidth,
+    naturalHeight,
+    pdfPageWidth,
+    pdfPageHeight
+  ) as FreeSignatureElement;
+}
+
+/** Legge un file immagine caricato dall'utente e lo converte in PNG (uniforma jpg/png/webp in un unico formato da incorporare nel PDF), restituendo anche le dimensioni naturali per calcolare le proporzioni iniziali del riquadro. */
+export async function fileToPngDataUrl(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  const rawDataUrl: string = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Lettura del file non riuscita."));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await loadImageElement(rawDataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Canvas 2D non disponibile in questo browser.");
+  }
+  ctx.drawImage(img, 0, 0);
+
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+  };
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Immagine non valida o non supportata."));
+    img.src = src;
+  });
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
@@ -174,6 +338,8 @@ export async function renderPage(
     canvasDataUrl,
     displayWidth: viewport.width,
     displayHeight: viewport.height,
+    pdfPageWidth: viewport.width / scale,
+    pdfPageHeight: viewport.height / scale,
     items,
   };
 }
@@ -186,6 +352,8 @@ export interface ExportPageInput {
   edits: Map<number, TextEdit>;
   /** Elementi di testo della pagina, per sapere dove disegnare copertura + nuovo testo. */
   items: PdfTextItem[];
+  /** Testo libero, immagini e firme aggiunti dall'utente su questa pagina. */
+  elements: FreeElement[];
 }
 
 /** Genera il PDF finale: copre con un rettangolo bianco ogni testo modificato e disegna sopra il nuovo testo (con font/dimensione/riquadro scelti dall'utente), poi applica la rotazione. */
@@ -213,6 +381,16 @@ export async function exportPdf(pages: ExportPageInput[]): Promise<Uint8Array> {
   }
 
   const sourceCache = new Map<File, Awaited<ReturnType<typeof PDFDocument.load>>>();
+  const imageCache = new Map<string, Awaited<ReturnType<typeof output.embedPng>>>();
+
+  async function getEmbeddedImage(dataUrl: string) {
+    let image = imageCache.get(dataUrl);
+    if (!image) {
+      image = await output.embedPng(dataUrlToBytes(dataUrl));
+      imageCache.set(dataUrl, image);
+    }
+    return image;
+  }
 
   for (const pageInfo of pages) {
     let sourcePdf = sourceCache.get(pageInfo.file);
@@ -247,6 +425,30 @@ export async function exportPdf(pages: ExportPageInput[]): Promise<Uint8Array> {
           size: edit.fontSize,
           font,
           color: rgb(0, 0, 0),
+        });
+      }
+    }
+
+    for (const element of pageInfo.elements) {
+      const bottomY = element.y - element.height;
+
+      if (element.type === "text") {
+        if (element.text.trim().length === 0) continue;
+        const font = await getFont(element.fontFamily);
+        copiedPage.drawText(element.text, {
+          x: element.x,
+          y: bottomY + Math.max(2, (element.height - element.fontSize) / 2),
+          size: element.fontSize,
+          font,
+          color: rgb(0, 0, 0),
+        });
+      } else {
+        const embedded = await getEmbeddedImage(element.dataUrl);
+        copiedPage.drawImage(embedded, {
+          x: element.x,
+          y: bottomY,
+          width: element.width,
+          height: element.height,
         });
       }
     }
